@@ -1,0 +1,24 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1045 &1
+EditorBuildSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/00_Bootstrap.unity
+    guid: e8366af87c4d25e4fba1f9d55a7880cf
+  - enabled: 1
+    path: Assets/Scenes/01_Arrival.unity
+    guid: 26925fcf91eceb84797f876120c4544f
+  - enabled: 1
+    path: Assets/Scenes/02_Waiting.unity
+    guid: e1c72f50bf2110d42b3880f387bada35
+  - enabled: 1
+    path: Assets/Scenes/03_Boarding.unity
+    guid: bc0d5fcecde973341a167bdcc396d2bb
+  - enabled: 1
+    path: Assets/Scenes/04_Departure.unity
+    guid: d12093afaf908a34db7ccf50670a3cf9
+  m_configObjects: {}
+  m_UseUCBPForAssetBundles: 0
