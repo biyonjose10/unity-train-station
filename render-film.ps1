@@ -15,7 +15,7 @@
 param(
     [switch]$Probe,
     [switch]$SkipBuild,
-    [string]$Unity = "C:\Users\biyon\Unity\Editors\6000.0.83f1\Editor\Unity.exe",
+    [string]$Unity = "",
     [string]$Output = "Recordings\AshfordHill.mp4"
 )
 
@@ -25,13 +25,42 @@ $proj = $PSScriptRoot
 $logDir = Join-Path $proj "Logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
+function Find-Unity {
+    # Unity Hub can be told to install editors anywhere, and on a machine without admin rights it
+    # will not be under Program Files at all. Search the usual places rather than assuming one.
+    $roots = @(
+        (Join-Path $HOME "Unity\Editors"),
+        (Join-Path $env:ProgramFiles "Unity\Hub\Editor"),
+        (Join-Path ${env:ProgramFiles(x86)} "Unity\Hub\Editor")
+    )
+
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+
+        $found = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+                 Sort-Object Name -Descending |
+                 ForEach-Object { Join-Path $_.FullName "Editor\Unity.exe" } |
+                 Where-Object { Test-Path $_ } |
+                 Select-Object -First 1
+
+        if ($found) { return $found }
+    }
+
+    throw "Unity editor not found. Pass -Unity <path to Unity.exe>."
+}
+
 function Find-Ffmpeg {
     $cmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
-    # winget installs it under the user's package directory and only adds it to PATH for new shells.
-    $guess = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin\ffmpeg.exe"
-    if (Test-Path $guess) { return $guess }
+    # winget installs it under the user's package directory and only adds it to PATH for new
+    # shells, so a freshly installed ffmpeg is invisible to the session that installed it.
+    $pkgRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
+    if (Test-Path $pkgRoot) {
+        $found = Get-ChildItem $pkgRoot -Filter "ffmpeg.exe" -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
 
     throw "ffmpeg not found. Install it with: winget install --id Gyan.FFmpeg -e"
 }
@@ -53,8 +82,12 @@ function Invoke-Unity([string]$method, [string]$logName) {
     if ($p.ExitCode -ne 0) { throw "$method failed with exit code $($p.ExitCode)." }
 }
 
+if ([string]::IsNullOrWhiteSpace($Unity)) { $Unity = Find-Unity }
 if (-not (Test-Path $Unity)) { throw "Unity not found at $Unity" }
+
 $ffmpeg = Find-Ffmpeg
+Write-Host "Unity:  $Unity"
+Write-Host "ffmpeg: $ffmpeg"
 
 if (-not $SkipBuild) {
     Invoke-Unity "TrainStation.Build.BuildAll.BatchBuild" "build.log"

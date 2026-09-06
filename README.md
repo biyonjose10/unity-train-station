@@ -23,7 +23,10 @@ Change the builders and regenerate.
 ## Requirements
 
 - Unity **6000.0.83f1** (Unity 6 LTS), Built-in Render Pipeline.
-- No admin rights needed — the editor lives under `C:\Users\biyon\Unity\Editors`.
+- ffmpeg, for the MP4 (`winget install --id Gyan.FFmpeg`).
+- **No admin rights needed.** Unity Hub installs per-user as an MSIX package, and the editor
+  can be pointed at any writable folder via **Hub ▸ Installs ▸ Install location**.
+  `render-film.ps1` finds both Unity and ffmpeg wherever they landed.
 
 ## Running it
 
@@ -131,9 +134,12 @@ It needs domain reload disabled to work at all, which it sets for itself.
 ## Making the MP4
 
 ```powershell
-.ender-film.ps1              # builds, renders, muxes -> Recordings/AshfordHill.mp4
-.ender-film.ps1 -Probe       # 8 seconds at 640x360, to check the pipeline first
-.ender-film.ps1 -SkipBuild   # reuse the scenes already on disk
+.
+ender-film.ps1              # builds, renders, muxes -> Recordings/AshfordHill.mp4
+.
+ender-film.ps1 -Probe       # 8 seconds at 640x360, to check the pipeline first
+.
+ender-film.ps1 -SkipBuild   # reuse the scenes already on disk
 ```
 
 No editor window, no buttons. `FilmCapture` runs the film in batch mode and writes a JPEG
