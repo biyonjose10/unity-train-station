@@ -61,6 +61,7 @@ The track runs along **X**. The train departs towards **+X**. **Z** is across th
 | `PassengerWalker.cs` | Procedural walk cycle driven by distance covered. Legs, arms, hip bob and lean all come off one stride phase. |
 | `BoardingDirector.cs` | Runs the boarding: chime, doors open, passengers board, doors slam down the train one at a time, guard's whistle. Exists because a delegate can't be saved into a scene. |
 | `CarriageDoor.cs` | One slam door, hinged at its leading edge, swinging out over the platform. |
+| `FilmCapture.cs` | Headless capture: JPEG sequence plus a WAV, both streamed rather than buffered. |
 | `CameraDolly.cs` | Damped look-at plus drift and handheld noise. The lag is the point: the train pulls ahead of frame instead of staying pinned to centre. |
 | `SceneFlowManager.cs` | Loads the four scenes in order with a fade. Lives in `00_Bootstrap` and survives every load. |
 | `SignalLight.cs` | Two-aspect colour-light signal. Red until the other train is clear. |
@@ -79,6 +80,7 @@ The track runs along **X**. The train departs towards **+X**. **Z** is across th
 | `RecordSequence.cs` | Configures Unity Recorder for the MP4. |
 | `SceneSnapshot.cs` | Renders a still from each scene's own camera into `Snapshots/`, for checking framing without opening the editor. |
 | `Playtest.cs` | Runs the whole film headlessly in play mode, grabbing frames into `Playtest/` and failing on any runtime error. |
+| `RenderFilm.cs` | Drives `FilmCapture` from the command line. Watch the two ordering traps documented in it. |
 
 ## Things worth knowing before you change anything
 
@@ -126,12 +128,27 @@ Unity.exe -batchmode -projectPath <project>           -executeMethod TrainStatio
 
 It needs domain reload disabled to work at all, which it sets for itself.
 
-## Recording the MP4
+## Making the MP4
 
-**Tools ▸ Train Station ▸ Record Film** sets up Unity Recorder and captures the Game View for
-the whole run — scene loads do not interrupt it, so the four separate scene files still produce
-one continuous take. Output lands in `Recordings/`.
+```powershell
+.ender-film.ps1              # builds, renders, muxes -> Recordings/AshfordHill.mp4
+.ender-film.ps1 -Probe       # 8 seconds at 640x360, to check the pipeline first
+.ender-film.ps1 -SkipBuild   # reuse the scenes already on disk
+```
 
-If the automated path misbehaves, the manual fallback is: **Window ▸ General ▸ Recorder ▸
-Recorder Window**, add a Movie recorder, set 1920×1080 at 60 fps with audio on, press Start
-Recording, and it will capture until you stop it.
+No editor window, no buttons. `FilmCapture` runs the film in batch mode and writes a JPEG
+sequence plus a WAV; ffmpeg muxes them. Two details make it work:
+
+- **`Time.captureFramerate`** pins `Time.deltaTime` to exactly 1/fps and lets the game run as
+  fast as it can render, so the output plays at real speed however slow the machine is.
+- **`AudioRenderer`** taps the audio mixer, which is the only way to get the synthesised whistle
+  and chuffs out of a headless run. Batch mode does produce real audio — verified.
+
+The screen fade lives in `OnGUI`, which an offscreen `Camera.Render` never sees, so it is
+composited back in from `SceneFlowManager.FadeAlpha`.
+
+### Or use Unity Recorder
+
+**Tools ▸ Train Station ▸ Record Film (MP4)** configures the Recorder window instead, if you
+would rather drive it by hand. Scene loads do not interrupt a Recorder capture, so the four
+separate scene files still produce one continuous take.

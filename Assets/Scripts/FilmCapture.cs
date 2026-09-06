@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.IO;
 using Unity.Collections;
 using UnityEngine;
@@ -9,25 +8,30 @@ namespace TrainStation
     /// Captures the film to a JPEG sequence plus a WAV, headlessly, for ffmpeg to mux into an MP4.
     ///
     /// This exists because Unity Recorder needs its editor window driven by hand, and the point of
-    /// this project is that the whole film can be produced from a command line. The two pieces
-    /// that make it work:
+    /// this project is that the whole film can be produced from a command line. Two things make it
+    /// work:
     ///
     /// - Time.captureFramerate pins Time.deltaTime to exactly 1/fps and lets the game run as fast
     ///   as it can render. Without it the capture would be tied to wall-clock speed and the film
     ///   would play back at whatever framerate the machine happened to manage.
-    /// - AudioRenderer taps the audio mixer's output, which is the only way to get the synthesised
+    /// - AudioRenderer taps the audio mixer output, which is the only way to get the synthesised
     ///   whistle and chuffs out of a headless run.
     ///
-    /// Camera.Render is used rather than a screen grab, so the OnGUI fade never appears in the
-    /// captured frame; the fade is composited back in from SceneFlowManager.FadeAlpha.
+    /// It is written to hold almost nothing in memory. A first version accumulated the whole
+    /// soundtrack in a List&lt;float&gt; and allocated two full-frame Color32 arrays per frame, and
+    /// the machine ran out of RAM and killed the editor halfway through. Audio now streams
+    /// straight to disk and the frame is darkened in place through the texture's raw bytes.
+    ///
+    /// Camera.Render is used rather than a screen grab, so the OnGUI fade never reaches the
+    /// captured frame; it is composited back in from SceneFlowManager.FadeAlpha.
     /// </summary>
     public class FilmCapture : MonoBehaviour
     {
-        public int width = 1920;
-        public int height = 1080;
+        public int width = 1280;
+        public int height = 720;
         public int fps = 30;
         public float seconds = 96f;
-        public int jpegQuality = 92;
+        public int jpegQuality = 90;
         public string frameDir = "Capture/frames";
         public string wavPath = "Capture/audio.wav";
 
@@ -40,7 +44,9 @@ namespace TrainStation
         Texture2D _readback;
         SceneFlowManager _flow;
 
-        readonly List<float> _audio = new List<float>();
+        FileStream _wavStream;
+        BinaryWriter _wav;
+        int _samplesWritten;
         bool _audioRunning;
 
         void Awake()
@@ -48,7 +54,8 @@ namespace TrainStation
             DontDestroyOnLoad(gameObject);
 
             Directory.CreateDirectory(frameDir);
-            Directory.CreateDirectory(Path.GetDirectoryName(wavPath));
+            string wavDir = Path.GetDirectoryName(wavPath);
+            if (!string.IsNullOrEmpty(wavDir)) Directory.CreateDirectory(wavDir);
 
             _totalFrames = Mathf.CeilToInt(seconds * fps);
 
@@ -58,6 +65,8 @@ namespace TrainStation
 
             _rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32) { antiAliasing = 1 };
             _readback = new Texture2D(width, height, TextureFormat.RGB24, false);
+
+            OpenWav();
 
             AudioRenderer.Start();
             _audioRunning = true;
@@ -75,6 +84,11 @@ namespace TrainStation
 
             FramesWritten++;
 
+            if (FramesWritten % (fps * 10) == 0)
+            {
+                Debug.Log("[FilmCapture] " + FramesWritten + " / " + _totalFrames + " frames");
+            }
+
             if (FramesWritten >= _totalFrames) Finish();
         }
 
@@ -82,16 +96,20 @@ namespace TrainStation
         {
             if (!_audioRunning) return;
 
-            // One capture frame's worth of mixer output. This has to be drained every frame or
-            // the audio drifts out of step with the picture.
+            // One capture frame's worth of mixer output. This must be drained every frame or the
+            // audio drifts out of step with the picture.
             int samples = AudioRenderer.GetSampleCountForCaptureFrame();
             if (samples <= 0) return;
 
             var buffer = new NativeArray<float>(samples * 2, Allocator.Temp);
             AudioRenderer.Render(buffer);
 
-            for (int i = 0; i < buffer.Length; i++) _audio.Add(buffer[i]);
+            for (int i = 0; i < buffer.Length; i++)
+            {
+                _wav.Write((short)(Mathf.Clamp(buffer[i], -1f, 1f) * short.MaxValue));
+            }
 
+            _samplesWritten += buffer.Length;
             buffer.Dispose();
         }
 
@@ -106,6 +124,8 @@ namespace TrainStation
 
             if (_flow == null) _flow = FindFirstObjectByType<SceneFlowManager>();
 
+            bool rendered = false;
+
             if (cam != null)
             {
                 var prevTarget = cam.targetTexture;
@@ -119,16 +139,16 @@ namespace TrainStation
 
                 cam.targetTexture = prevTarget;
                 RenderTexture.active = prevActive;
-            }
-            else
-            {
-                // Between scenes there may be no camera at all; a black frame is correct here,
-                // because that is exactly when the film is fading through black anyway.
-                Fill(Color.black);
+
+                rendered = true;
             }
 
             // The fade lives in OnGUI, which an offscreen render never sees, so apply it here.
+            // Between scenes there may briefly be no camera at all, which is fine: that is exactly
+            // when the film is sitting on black anyway.
             float alpha = _flow != null ? _flow.FadeAlpha : 0f;
+            if (!rendered) alpha = 1f;
+
             if (alpha > 0.001f) Darken(alpha);
 
             _readback.Apply();
@@ -137,29 +157,20 @@ namespace TrainStation
             File.WriteAllBytes(path, _readback.EncodeToJPG(jpegQuality));
         }
 
-        void Fill(Color c)
-        {
-            var pixels = _readback.GetPixels32();
-            var c32 = (Color32)c;
-            for (int i = 0; i < pixels.Length; i++) pixels[i] = c32;
-            _readback.SetPixels32(pixels);
-        }
-
+        /// <summary>
+        /// Scales every colour byte in place. RGB24 has no alpha channel and no padding, so every
+        /// byte in the buffer is a colour component and a uniform scale is exactly a fade to black
+        /// — no per-pixel struct copies, and nothing allocated.
+        /// </summary>
         void Darken(float alpha)
         {
+            var raw = _readback.GetRawTextureData<byte>();
             float k = Mathf.Clamp01(1f - alpha);
-            var pixels = _readback.GetPixels32();
 
-            for (int i = 0; i < pixels.Length; i++)
+            for (int i = 0; i < raw.Length; i++)
             {
-                var p = pixels[i];
-                p.r = (byte)(p.r * k);
-                p.g = (byte)(p.g * k);
-                p.b = (byte)(p.b * k);
-                pixels[i] = p;
+                raw[i] = (byte)(raw[i] * k);
             }
-
-            _readback.SetPixels32(pixels);
         }
 
         void Finish()
@@ -172,10 +183,10 @@ namespace TrainStation
                 _audioRunning = false;
             }
 
-            WriteWav(wavPath, _audio, AudioSettings.outputSampleRate, 2);
+            CloseWav();
 
             Debug.Log("[FilmCapture] Wrote " + FramesWritten + " frames and " +
-                      (_audio.Count / 2) + " audio samples to " + wavPath);
+                      (_samplesWritten / 2) + " audio frames to " + wavPath);
 
             Done = true;
         }
@@ -183,6 +194,7 @@ namespace TrainStation
         void OnDestroy()
         {
             if (_audioRunning) AudioRenderer.Stop();
+            CloseWav();
 
             Time.captureFramerate = 0;
 
@@ -190,35 +202,53 @@ namespace TrainStation
             if (_readback != null) Destroy(_readback);
         }
 
-        /// <summary>Plain 16-bit PCM WAV. Nothing clever, but ffmpeg reads it without complaint.</summary>
-        static void WriteWav(string path, List<float> samples, int sampleRate, int channels)
+        // ---------------------------------------------------------------------------- wav
+
+        void OpenWav()
         {
-            using (var stream = new FileStream(path, FileMode.Create))
-            using (var w = new BinaryWriter(stream))
-            {
-                int dataBytes = samples.Count * 2;
+            _wavStream = new FileStream(wavPath, FileMode.Create, FileAccess.Write);
+            _wav = new BinaryWriter(_wavStream);
 
-                w.Write(new char[] { 'R', 'I', 'F', 'F' });
-                w.Write(36 + dataBytes);
-                w.Write(new char[] { 'W', 'A', 'V', 'E' });
+            // Sizes are patched in CloseWav once the length is known.
+            int rate = AudioSettings.outputSampleRate;
+            const int channels = 2;
 
-                w.Write(new char[] { 'f', 'm', 't', ' ' });
-                w.Write(16);
-                w.Write((short)1);                                  // PCM
-                w.Write((short)channels);
-                w.Write(sampleRate);
-                w.Write(sampleRate * channels * 2);                 // byte rate
-                w.Write((short)(channels * 2));                     // block align
-                w.Write((short)16);                                 // bits per sample
+            _wav.Write(new char[] { 'R', 'I', 'F', 'F' });
+            _wav.Write(0);
+            _wav.Write(new char[] { 'W', 'A', 'V', 'E' });
 
-                w.Write(new char[] { 'd', 'a', 't', 'a' });
-                w.Write(dataBytes);
+            _wav.Write(new char[] { 'f', 'm', 't', ' ' });
+            _wav.Write(16);
+            _wav.Write((short)1);                       // PCM
+            _wav.Write((short)channels);
+            _wav.Write(rate);
+            _wav.Write(rate * channels * 2);            // byte rate
+            _wav.Write((short)(channels * 2));          // block align
+            _wav.Write((short)16);                      // bits per sample
 
-                for (int i = 0; i < samples.Count; i++)
-                {
-                    w.Write((short)(Mathf.Clamp(samples[i], -1f, 1f) * short.MaxValue));
-                }
-            }
+            _wav.Write(new char[] { 'd', 'a', 't', 'a' });
+            _wav.Write(0);
+        }
+
+        void CloseWav()
+        {
+            if (_wav == null) return;
+
+            _wav.Flush();
+
+            int dataBytes = _samplesWritten * 2;
+
+            _wavStream.Seek(4, SeekOrigin.Begin);
+            _wav.Write(36 + dataBytes);
+
+            _wavStream.Seek(40, SeekOrigin.Begin);
+            _wav.Write(dataBytes);
+
+            _wav.Flush();
+            _wav.Close();
+
+            _wav = null;
+            _wavStream = null;
         }
     }
 }
