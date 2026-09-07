@@ -67,7 +67,7 @@ namespace TrainStation.Build
         // -------------------------------------------------------------------- environment
 
         /// <summary>Dusk lighting, fog and sky. The single biggest lever on how this looks.</summary>
-        public static Light BuildEnvironment()
+        public static Light BuildEnvironment(Transform parent)
         {
             // Reuse the asset if it is already there. Recreating it on every scene build would
             // hand out a fresh GUID and leave the scenes built earlier in the run with no sky.
@@ -104,7 +104,7 @@ namespace TrainStation.Build
             RenderSettings.fogColor = new Color(0.315f, 0.30f, 0.355f);
             RenderSettings.fogDensity = 0.0072f;
 
-            var go = new GameObject("Sun (dusk)");
+            var go = Prim.Empty(parent, "Sun (dusk)");
             var sun = go.AddComponent<Light>();
             sun.type = LightType.Directional;
             sun.color = new Color(1f, 0.71f, 0.46f);
@@ -144,6 +144,10 @@ namespace TrainStation.Build
             {
                 Prim.Box(sleepers, "Sleeper", new Vector3(x, 0.34f, z), new Vector3(0.27f, 0.17f, 3.0f), Sleeper);
             }
+
+            // 336 identical boxes per line say nothing you cannot say in one. Bake them, or the
+            // Hierarchy is two thirds ballast and nobody can find the train in it.
+            MeshBake.Flatten(sleepers, "Sleepers_" + name);
 
             var rails = Prim.Empty(root, "Rails").transform;
             for (int side = -1; side <= 1; side += 2)
@@ -188,19 +192,25 @@ namespace TrainStation.Build
             float from = PlatformXMin + 6f;
             float to = PlatformXMax - 6f;
 
+            // Pillars and brackets live in their own group so they can be baked. The lamps below
+            // cannot be — they carry real lights — which is exactly why they are kept apart.
+            var frame = Prim.Empty(canopy, "Frame").transform;
+
             for (float x = from; x <= to; x += 9f)
             {
                 foreach (float z in new[] { frontZ, backZ })
                 {
-                    Prim.Cyl(canopy, "Pillar", new Vector3(x, PlatformTopY + (roofY - PlatformTopY) * 0.5f, z),
+                    Prim.Cyl(frame, "Pillar", new Vector3(x, PlatformTopY + (roofY - PlatformTopY) * 0.5f, z),
                              0.13f, roofY - PlatformTopY, Prim.AxisY, Steel);
 
                     // Bracket where the pillar meets the roof; cheap, but it stops the canopy
                     // looking like it is balanced on sticks.
-                    Prim.Box(canopy, "Bracket", new Vector3(x, roofY - 0.45f, z),
+                    Prim.Box(frame, "Bracket", new Vector3(x, roofY - 0.45f, z),
                              new Vector3(0.1f, 0.7f, 0.7f), new Vector3(45f, 0f, 0f), Steel);
                 }
             }
+
+            MeshBake.Flatten(frame, "CanopyFrame");
 
             Prim.Box(canopy, "Roof", new Vector3(cx, roofY + 0.12f, (frontZ + backZ) * 0.5f),
                      new Vector3(len - 10f, 0.22f, backZ - frontZ + 2.6f), RoofPanel);
@@ -393,10 +403,8 @@ namespace TrainStation.Build
         /// Depth cues. None of this is looked at directly; it exists so the fog has something
         /// to eat, which is what sells distance.
         /// </summary>
-        public static void BuildScenery(Transform parent)
+        public static void BuildScenery(Transform root)
         {
-            var root = Prim.Empty(parent, "Scenery").transform;
-
             var poles = Prim.Empty(root, "TelegraphPoles").transform;
             for (float x = -180f; x <= 320f; x += 32f)
             {
@@ -405,6 +413,8 @@ namespace TrainStation.Build
                 Prim.Box(p, "ArmUpper", new Vector3(0f, 7.9f, 0f), new Vector3(0.09f, 0.09f, 2.0f), Timber);
                 Prim.Box(p, "ArmLower", new Vector3(0f, 7.25f, 0f), new Vector3(0.09f, 0.09f, 1.5f), Timber);
             }
+
+            MeshBake.Flatten(poles, "TelegraphPoles");
 
             var trees = Prim.Empty(root, "Trees").transform;
             var rng = new System.Random(20260906);
@@ -419,6 +429,8 @@ namespace TrainStation.Build
                 Prim.Capsule(t, "Canopy", new Vector3(0f, h * 0.78f, 0f), h * 0.62f, h * 0.85f, Prim.AxisY, Foliage);
             }
 
+            MeshBake.Flatten(trees, "Trees");
+
             // Town roofline behind the station, deep in the fog.
             var town = Prim.Empty(root, "Town").transform;
             for (int i = 0; i < 34; i++)
@@ -430,33 +442,81 @@ namespace TrainStation.Build
 
                 Prim.Box(town, "Block", new Vector3(x, h * 0.5f, z), new Vector3(w, h, w * 0.8f), Silhouette);
             }
+
+            MeshBake.Flatten(town, "Town");
         }
 
         /// <summary>
         /// The whole station in one call, minus trains and cameras. Every scene starts here.
+        ///
+        /// The groups it returns are the top level of the Hierarchy, and they are numbered on
+        /// purpose: opening any scene should show eight rows that say what the scene is made of,
+        /// in the order you would explain them, rather than a heap you have to go digging in.
         /// </summary>
-        public static Transform BuildWorld(bool includeSignal, out SignalLight signal)
+        public static StationWorld BuildWorld(bool includeSignal)
         {
-            var world = new GameObject("World").transform;
+            var w = new StationWorld();
 
-            BuildEnvironment();
-            BuildGround(world);
+            // Created in reading order, because Unity lists root objects in the order they were
+            // made — the numbers are there to survive somebody sorting the Hierarchy by name.
+            w.guide     = BuildGuide();
+            w.camera    = Group("01 CAMERA");
+            w.lighting  = Group("02 LIGHTING");
+            w.track     = Group("03 TRACK");
+            w.station   = Group("04 STATION");
+            w.scenery   = Group("05 SCENERY");
+            w.trains    = Group("06 TRAINS");
+
+            BuildEnvironment(w.lighting);
+
+            BuildGround(w.station);
 
             // Sleepers only where the camera can see them through the fog.
-            LayTrack(world, "TrackA_Platform", TrackAZ, -190f, 330f);
-            LayTrack(world, "TrackB_Through", TrackBZ, -190f, 330f);
+            LayTrack(w.track, "TrackA_Platform", TrackAZ, -190f, 330f);
+            LayTrack(w.track, "TrackB_Through", TrackBZ, -190f, 330f);
 
-            BuildPlatform(world);
-            BuildStationBuilding(world);
-            BuildScenery(world);
+            BuildPlatform(w.station);
+            BuildStationBuilding(w.station);
+            BuildScenery(w.scenery);
 
             // Ahead of our train and inside the shot. At x = 64 it sat behind the camera in
             // the waiting scene, which rather defeated the point of having a signal at all.
-            signal = includeSignal
-                ? BuildSignal(world, new Vector3(46f, 0f, -3.4f), "Signal_Ahead")
+            w.signal = includeSignal
+                ? BuildSignal(w.track, new Vector3(46f, 0f, -3.4f), "Signal_Ahead")
                 : null;
 
-            return world;
+            return w;
+        }
+
+        /// <summary>
+        /// The Scene-view guide, pre-loaded with the layout constants so its gizmos and the
+        /// geometry can never disagree — both read the same numbers from this class.
+        /// </summary>
+        static SceneGuide BuildGuide()
+        {
+            var g = Group("00 GUIDE").gameObject.AddComponent<SceneGuide>();
+
+            g.trackAZ = TrackAZ;
+            g.trackBZ = TrackBZ;
+            g.platformEdgeZ = PlatformEdgeZ;
+            g.platformFromX = PlatformXMin;
+            g.platformToX = PlatformXMax;
+
+            return g;
+        }
+
+        /// <summary>
+        /// An empty at the origin, used only to hold a section of the scene together. Identity
+        /// transform matters: TrainMotion and CameraDolly both work in world space, so a group
+        /// that was moved or scaled would silently drag everything under it out of place.
+        /// </summary>
+        static Transform Group(string name)
+        {
+            var go = new GameObject(name);
+            go.transform.position = Vector3.zero;
+            go.transform.rotation = Quaternion.identity;
+            go.transform.localScale = Vector3.one;
+            return go.transform;
         }
     }
 }
